@@ -7,7 +7,7 @@
 //! and runs them in parallel—each pinned to a dedicated performance core—with live progress
 //! spinners and a summary on completion.
 //!
-//! ## Usage
+//! ## Quick Start
 //!
 //! ```no_run
 //! # async fn example() -> anyhow::Result<()> {
@@ -17,6 +17,26 @@
 //!     .jobs(4)
 //!     .run()
 //!     .await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Two-Phase Execution
+//!
+//! Use [`prepare()`](CriterionSwarmBuilder::prepare) to inspect discovered benchmarks
+//! before running them:
+//!
+//! ```no_run
+//! # async fn example() -> anyhow::Result<()> {
+//! use criterion_swarm::CriterionSwarm;
+//!
+//! let swarm = CriterionSwarm::builder()
+//!     .jobs(4)
+//!     .prepare()
+//!     .await?;
+//!
+//! println!("Found {} benchmarks, using {} CPUs", swarm.benchmarks().len(), swarm.jobs());
+//! swarm.run().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -38,7 +58,7 @@ use clap::{Arg, Command};
 
 use self::cpu::PerformanceCoresPool;
 use self::discovery::BenchmarkDiscovery;
-pub use self::output::{NoopReporter, ProgressReporter};
+pub use self::output::{NoopReporter, OutputMode, ProgressReporter};
 use self::runner::BenchRunner;
 
 /// Trait for receiving events from benchmark execution.
@@ -48,6 +68,18 @@ use self::runner::BenchRunner;
 /// the ones you care about.
 #[allow(unused_variables)]
 pub trait Reporter: Send + Sync {
+    /// Called when the build step starts (compiling benchmark binaries).
+    fn on_build_start(&self) {}
+
+    /// Called for each line of build output (from cargo's stderr).
+    fn on_build_output(&self, line: &str) {}
+
+    /// Called when the build step completes successfully.
+    fn on_build_complete(&self, output_lines: &[String]) {}
+
+    /// Called when the build step fails.
+    fn on_build_failed(&self, output_lines: &[String]) {}
+
     /// Called once before any benchmarks start, with the list of benchmark names
     /// that will be executed and the number of parallel jobs (CPUs) that will be used.
     fn on_run_start(&self, benchmarks: &[String], jobs: usize) {}
@@ -69,12 +101,12 @@ pub trait Reporter: Send + Sync {
     fn on_run_complete(&self) {}
 }
 
-/// Builder for configuring and running parallel criterion benchmarks.
+/// Builder for configuring parallel criterion benchmarks.
 ///
 /// Create via [`CriterionSwarm::builder()`], configure with the setter methods,
-/// then call [`.run()`](Self::run) to execute.
+/// then call [`.prepare()`](Self::prepare) or [`.run()`](Self::run).
 #[derive(Clone)]
-pub struct CriterionSwarm {
+pub struct CriterionSwarmBuilder {
     binaries: Vec<PathBuf>,
     jobs: usize,
     build_args: Vec<String>,
@@ -82,10 +114,21 @@ pub struct CriterionSwarm {
     output: Option<Arc<dyn Reporter>>,
 }
 
+/// A prepared benchmark run, ready to execute.
+///
+/// Created by [`CriterionSwarmBuilder::prepare()`]. Allows inspecting the discovered
+/// benchmarks and job count before running.
+pub struct CriterionSwarm {
+    benches: Vec<(PathBuf, String)>,
+    jobs: usize,
+    bench_args: Vec<String>,
+    output: Arc<dyn Reporter>,
+}
+
 impl CriterionSwarm {
     /// Create a new builder with default settings.
-    pub fn builder() -> Self {
-        Self {
+    pub fn builder() -> CriterionSwarmBuilder {
+        CriterionSwarmBuilder {
             binaries: Vec::new(),
             jobs: 0,
             build_args: Vec::new(),
@@ -94,6 +137,25 @@ impl CriterionSwarm {
         }
     }
 
+    /// The list of benchmark names that will be executed.
+    pub fn benchmarks(&self) -> Vec<&str> {
+        self.benches.iter().map(|(_, name)| name.as_str()).collect()
+    }
+
+    /// The number of parallel jobs (CPUs) that will be used.
+    pub fn jobs(&self) -> usize {
+        self.jobs
+    }
+
+    /// Execute all discovered benchmarks in parallel.
+    pub async fn run(&self) -> Result<()> {
+        let runner = BenchRunner::new(self.jobs, &self.bench_args, self.output.clone());
+        runner.run(&self.benches).await?;
+        Ok(())
+    }
+}
+
+impl CriterionSwarmBuilder {
     /// Add a pre-built benchmark binary (skip build step).
     pub fn binary(mut self, path: impl Into<PathBuf>) -> Self {
         self.binaries.push(path.into());
@@ -201,10 +263,10 @@ impl CriterionSwarm {
         }
     }
 
-    /// Run criterion benchmarks in parallel.
+    /// Build benchmark binaries and discover all benchmarks to run.
     ///
-    /// This is an async method—bring your own tokio runtime.
-    pub async fn run(&self) -> Result<()> {
+    /// Returns a [`CriterionSwarm`] that can be inspected (benchmarks, jobs) and then executed.
+    pub async fn prepare(&self) -> Result<CriterionSwarm> {
         let (filter, exact, remaining_bench_args) = self.parse_bench_args();
 
         let discovery = BenchmarkDiscovery::new(
@@ -214,8 +276,13 @@ impl CriterionSwarm {
             exact,
         );
 
+        let output: Arc<dyn Reporter> = match &self.output {
+            Some(o) => o.clone(),
+            None => Arc::new(output::ProgressReporter::default()),
+        };
+
         let binaries = if self.binaries.is_empty() {
-            discovery.build().await?
+            discovery.build(&output).await?
         } else {
             self.binaries.clone()
         };
@@ -233,14 +300,19 @@ impl CriterionSwarm {
 
         let max_jobs = self.max_jobs();
 
-        let output: Arc<dyn Reporter> = match &self.output {
-            Some(o) => o.clone(),
-            None => Arc::new(output::ProgressReporter::default()),
-        };
+        Ok(CriterionSwarm {
+            benches,
+            jobs: max_jobs,
+            bench_args: remaining_bench_args,
+            output,
+        })
+    }
 
-        let runner = BenchRunner::new(max_jobs, &remaining_bench_args, output);
-        runner.run(&benches).await?;
-
-        Ok(())
+    /// Build, discover, and run criterion benchmarks in parallel.
+    ///
+    /// This is a convenience method equivalent to calling
+    /// [`.prepare()`](Self::prepare) followed by [`.run()`](CriterionSwarm::run).
+    pub async fn run(&self) -> Result<()> {
+        self.prepare().await?.run().await
     }
 }

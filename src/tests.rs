@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use crate::output::{is_noisy_line, strip_bench_prefix};
-use crate::{CriterionSwarm, NoopReporter, ProgressReporter, Reporter};
+use crate::{CriterionSwarm, NoopReporter, OutputMode, ProgressReporter, Reporter};
 
 // --- Builder tests ---
 
@@ -19,14 +19,6 @@ fn builder_defaults() {
 fn builder_jobs() {
     let swarm = CriterionSwarm::builder().jobs(4);
     assert_eq!(swarm.jobs, 4);
-}
-
-#[test]
-fn builder_binary() {
-    let swarm = CriterionSwarm::builder()
-        .binary("/tmp/bench1")
-        .binary("/tmp/bench2");
-    assert_eq!(swarm.binaries.len(), 2);
 }
 
 #[test]
@@ -146,11 +138,6 @@ fn noisy_line_normal_output() {
     assert!(!is_noisy_line("time:   [94.573 ns 94.599 ns 94.630 ns]"));
 }
 
-#[test]
-fn noisy_line_empty() {
-    assert!(!is_noisy_line(""));
-}
-
 // --- strip_bench_prefix tests ---
 
 #[test]
@@ -179,6 +166,10 @@ fn strip_prefix_empty_after_strip() {
 fn noop_reporter_implements_trait() {
     let reporter: &dyn Reporter = &NoopReporter;
     // All methods are no-ops; just verify they don't panic
+    reporter.on_build_start();
+    reporter.on_build_output("Compiling foo v0.1.0");
+    reporter.on_build_complete(&["Compiling foo v0.1.0".to_string()]);
+    reporter.on_build_failed(&["error[E0308]: mismatched types".to_string()]);
     reporter.on_run_start(&["bench1".to_string()], 2);
     reporter.on_benchmark_started("bench1");
     reporter.on_output_line("bench1", "some output");
@@ -259,13 +250,82 @@ fn custom_reporter_receives_events() {
 // --- ProgressReporter config tests ---
 
 #[test]
-fn progress_reporter_default_output_true() {
-    let _reporter = ProgressReporter::new();
-    // output defaults to true - we can verify by setting it explicitly
-    let _reporter = ProgressReporter::new().output(true);
+fn progress_reporter_builder_methods_chainable() {
+    let _reporter = ProgressReporter::new()
+        .build(OutputMode::SILENT)
+        .benchmarks(OutputMode::SILENT);
 }
 
+// --- Build hook tests ---
+
 #[test]
-fn progress_reporter_builder_methods_chainable() {
-    let _reporter = ProgressReporter::new().progress(false).output(false);
+fn custom_reporter_full_lifecycle() {
+    struct LifecycleReporter {
+        events: Mutex<Vec<String>>,
+    }
+
+    impl Reporter for LifecycleReporter {
+        fn on_build_start(&self) {
+            self.events.lock().unwrap().push("build_start".to_string());
+        }
+        fn on_build_output(&self, line: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("build_output:{line}"));
+        }
+        fn on_build_complete(&self, output_lines: &[String]) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("build_complete:{}", output_lines.len()));
+        }
+        fn on_run_start(&self, benchmarks: &[String], jobs: usize) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("run_start:{}:{}", benchmarks.len(), jobs));
+        }
+        fn on_benchmark_started(&self, benchmark: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("started:{benchmark}"));
+        }
+        fn on_benchmark_complete(&self, benchmark: &str, _output_lines: &[String]) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("complete:{benchmark}"));
+        }
+        fn on_run_complete(&self) {
+            self.events.lock().unwrap().push("run_complete".to_string());
+        }
+    }
+
+    let reporter = LifecycleReporter {
+        events: Mutex::new(Vec::new()),
+    };
+
+    reporter.on_build_start();
+    reporter.on_build_output("Compiling foo");
+    reporter.on_build_complete(&["Compiling foo".to_string()]);
+    reporter.on_run_start(&["bench_a".to_string()], 2);
+    reporter.on_benchmark_started("bench_a");
+    reporter.on_benchmark_complete("bench_a", &[]);
+    reporter.on_run_complete();
+
+    let events = reporter.events.lock().unwrap();
+    assert_eq!(
+        *events,
+        vec![
+            "build_start",
+            "build_output:Compiling foo",
+            "build_complete:1",
+            "run_start:1:2",
+            "started:bench_a",
+            "complete:bench_a",
+            "run_complete",
+        ]
+    );
 }

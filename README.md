@@ -5,10 +5,11 @@ Parallel [Criterion](https://github.com/bheisler/criterion.rs) benchmark runner 
 ## Features
 
 - **Parallel execution** — Run multiple criterion benchmarks simultaneously, each pinned to a dedicated performance core.
-- **Live progress** — Progress bars and spinners show real-time benchmark status.
+- **Live progress** — Progress bars and spinners show real-time build and benchmark status.
 - **Pluggable reporting** — Implement the `Reporter` trait to customize how results are displayed.
 - **Automatic discovery** — Builds and lists criterion benchmarks from your workspace automatically.
 - **Filtering** — Supports `--exact` and filter patterns to run subsets of benchmarks.
+- **Two-phase execution** — Inspect discovered benchmarks before running them.
 
 ## Usage
 
@@ -34,6 +35,20 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+## Two-Phase Execution
+
+Use `prepare()` to build and discover benchmarks, then inspect before running:
+
+```rust
+let swarm = CriterionSwarm::builder()
+    .jobs(4)
+    .prepare()
+    .await?;
+
+println!("Found {} benchmarks, using {} CPUs", swarm.benchmarks().len(), swarm.jobs());
+swarm.run().await?;
+```
+
 ## Builder API
 
 ```rust
@@ -49,7 +64,7 @@ CriterionSwarm::builder()
 
 ## Custom Reporters
 
-Implement the `Reporter` trait to handle benchmark events:
+Implement the `Reporter` trait to handle build and benchmark events:
 
 ```rust
 use criterion_swarm::Reporter;
@@ -57,6 +72,25 @@ use criterion_swarm::Reporter;
 struct MyReporter;
 
 impl Reporter for MyReporter {
+    fn on_build_start(&self) {
+        println!("Building benchmarks...");
+    }
+
+    fn on_build_output(&self, line: &str) {
+        println!("  {line}");
+    }
+
+    fn on_build_complete(&self, output_lines: &[String]) {
+        println!("Build done!");
+    }
+
+    fn on_build_failed(&self, output_lines: &[String]) {
+        println!("Build failed!");
+        for line in output_lines {
+            eprintln!("  {line}");
+        }
+    }
+
     fn on_run_start(&self, benchmarks: &[String], jobs: usize) {
         println!("Running {} benchmarks on {} cores", benchmarks.len(), jobs);
     }
@@ -72,7 +106,7 @@ impl Reporter for MyReporter {
 ```
 
 Built-in reporters:
-- `ProgressReporter` — Progress bars and spinners (default)
+- `ProgressReporter` — Progress bars and spinners with live build/benchmark output (default)
 - `NoopReporter` — Discards all output
 
 ## License
