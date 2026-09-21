@@ -1,4 +1,5 @@
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::output::{is_noisy_line, strip_bench_prefix};
 use crate::{CriterionSwarm, NoopReporter, OutputMode, ProgressReporter, Reporter};
@@ -53,6 +54,63 @@ fn builder_bench_args() {
 fn builder_output_sets_reporter() {
     let swarm = CriterionSwarm::builder().output(NoopReporter);
     assert!(swarm.output.is_some());
+}
+
+// --- Prepared swarm tests ---
+
+fn prepared(benches: &[(&str, &str)]) -> CriterionSwarm {
+    CriterionSwarm {
+        benches: benches
+            .iter()
+            .map(|(binary, name)| (PathBuf::from(binary), name.to_string()))
+            .collect(),
+        jobs: 1,
+        bench_args: Vec::new(),
+        output: Arc::new(NoopReporter),
+    }
+}
+
+#[test]
+fn retain_keeps_matching_benchmarks() {
+    let mut swarm = prepared(&[
+        ("/tmp/bench", "a/one"),
+        ("/tmp/bench", "b/two"),
+        ("/tmp/bench", "a/three"),
+    ]);
+    swarm.retain(|name| name.starts_with("a/"));
+
+    assert_eq!(swarm.benchmarks(), ["a/one", "a/three"]);
+}
+
+#[test]
+fn retain_keeps_each_benchmark_with_its_binary() {
+    let mut swarm = prepared(&[("/tmp/first", "a/one"), ("/tmp/second", "b/two")]);
+    swarm.retain(|name| name.starts_with("b/"));
+
+    assert_eq!(
+        swarm.benches,
+        vec![(PathBuf::from("/tmp/second"), "b/two".to_string())]
+    );
+}
+
+#[test]
+fn retain_can_keep_nothing() {
+    let mut swarm = prepared(&[("/tmp/bench", "a/one")]);
+    swarm.retain(|_| false);
+
+    assert!(swarm.benchmarks().is_empty());
+}
+
+#[test]
+fn retain_accepts_a_stateful_predicate() {
+    let mut seen = Vec::new();
+    let mut swarm = prepared(&[("/tmp/bench", "a/one"), ("/tmp/bench", "b/two")]);
+    swarm.retain(|name| {
+        seen.push(name.to_string());
+        true
+    });
+
+    assert_eq!(seen, ["a/one", "b/two"]);
 }
 
 // --- parse_bench_args tests ---

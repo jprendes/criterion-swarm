@@ -142,6 +142,15 @@ impl CriterionSwarm {
         self.benches.iter().map(|(_, name)| name.as_str()).collect()
     }
 
+    /// Keep only the benchmarks whose name satisfies the predicate.
+    ///
+    /// Criterion accepts a single filter, so selections it cannot express, such as
+    /// subtracting a denylist from an allowlist, are applied here instead. Retaining
+    /// nothing leaves [`run`](Self::run) with no work to do.
+    pub fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.benches.retain(|(_, name)| keep(name));
+    }
+
     /// The number of parallel jobs (CPUs) that will be used.
     pub fn jobs(&self) -> usize {
         self.jobs

@@ -49,6 +49,15 @@ println!("Found {} benchmarks, using {} CPUs", swarm.benchmarks().len(), swarm.j
 swarm.run().await?;
 ```
 
+`retain()` narrows the set before running, for selections a single criterion
+filter cannot express:
+
+```rust
+let mut swarm = CriterionSwarm::builder().prepare().await?;
+swarm.retain(|name| name.starts_with("sandboxes/") && !name.contains("noisy"));
+swarm.run().await?;
+```
+
 ## Builder API
 
 ```rust
