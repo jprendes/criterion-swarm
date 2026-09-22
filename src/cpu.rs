@@ -15,10 +15,28 @@ use simple_pool::{ResourcePool, ResourcePoolGuard};
 /// Filters for cores that are marked as `Performance` type and have the maximum
 /// number of logical processors (i.e., full-featured P-cores with hyperthreading,
 /// excluding any asymmetric E-cores).
+///
+/// The physical core owning logical CPU 0 is excluded. That CPU carries the
+/// boot CPU's housekeeping (timers, RCU, unbound kworkers), which adds
+/// scheduling latency, and its SMT siblings contend with that work. Losing a
+/// core costs throughput but keeps measurements comparable between runs. Only a
+/// single-core machine, which has nothing else to pin to, still uses CPU 0.
 static PERFORMANCE_CORES: LazyLock<Vec<&'static CpuInfo>> = LazyLock::new(|| {
-    cpu_pin::topology()
-        .expect("failed to detect CPU topology")
-        .best_cores()
+    let topology = cpu_pin::topology().expect("failed to detect CPU topology");
+    let usable = |core: &&'static CpuInfo| !core.logical_cpus.contains(&0);
+
+    let best: Vec<_> = topology.best_cores().into_iter().filter(usable).collect();
+    if !best.is_empty() {
+        return best;
+    }
+
+    // The only preferred core owns CPU 0, so prefer a lesser core over it.
+    let rest: Vec<_> = topology.cores.iter().filter(usable).collect();
+    if !rest.is_empty() {
+        return rest;
+    }
+
+    topology.best_cores()
 });
 
 /// A pool of performance cores that can be claimed by benchmark tasks.
